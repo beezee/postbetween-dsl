@@ -29,6 +29,9 @@ class Postbetween::PostbetweenHandler
     defn(:format, String) { |k| k.to_i }
       .when { |k| k == "0" || k.to_i > 0 }
     defn(:format, String) { |k| k }
+    defn(:format, "[]", Array) { |v| v.size }
+    defn(:format, "[]", _) { |v| 0 }
+    defn(:format, String, _) { |k, v| format(k) }
 
     defn(:after, Proc) do |p|
       @after = p
@@ -81,32 +84,32 @@ class Postbetween::PostbetweenHandler
       @part, @key, @handler = p, k, h
     end
 
-    defn(:value_or_default, _, _) { |v, k| v }
-      .when { |v, k| array_or_hash(v) }
+    defn(:value_or_default, _, _) { |v, _| v }
+      .when { |v, _| array_or_hash(v) }
     defn(:value_or_default, _, _) { |v, k| k.kind_of?(Integer) ? [] : {} }
 
-    defn(:assign, _, _, _) { |v, k, r| v[k] = after.call(r.run) }
-      .when { |v, k, r| array_or_hash(v) }
-    defn(:assign, _, _, _, _) { |v, k, nk, r| v[k][nk] = after.call(r.run) }
-      .when { |v, k, nk, r| array_or_hash(v) }
+    defn(:assign, _, _, RequestPartReader) { |v, k, r| v[k] = after.call(r.run) }
+      .when { |v, _, _| array_or_hash(v) }
+    defn(:assign, _, _, _, RequestPartReader) { |v, k, nk, r| v[k][nk] = after.call(r.run) }
+      .when { |v, _, _, _| array_or_hash(v) }
 
     defn(:run, String, [], _, _, RequestPartReader) do |k, lv, lk, r|
-      nk = format(k)
+      nk = format(k, lv[lk])
       lv[lk] = value_or_default(lv[lk], nk)
       assign(lv, lk, nk, r)
     end
+    defn(:run, String, RequestPart, RequestPartReader) do |k, p, r|
+      assign(p.contents, k, r)
+    end.when { |k, p, r| !k.include?(".") }
     defn(:run, String, Array, _, _, RequestPartReader) do |k, t, lv, lk, r|
-      nk = format(k)
+      nk = format(k, lv[lk])
       lv[lk] = value_or_default(lv[lk], nk)
       run(t[0], t[1..-1], lv[lk], nk, r)
     end
     defn(:run, String, RequestPart, RequestPartReader) do |k, p, r|
       ks = k.split(".")
-      nk = format(ks[0])
+      nk = format(ks[0], p.contents)
       run(ks[1], ks[2..-1], p.contents, nk, r)
-    end.when { |k, p, r| k.include?(".") }
-    defn(:run, String, RequestPart, RequestPartReader) do |k, p, r|
-      assign(p.contents, k, r)
     end
     defn(:run) { run(@key, @part, @reader)}
 
