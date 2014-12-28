@@ -21,6 +21,16 @@ class Postbetween::PostbetweenHandler
   class Body < RequestPart
   end
 
+  class Request
+    include Functional::PatternMatching
+    PART_KEYS = [:header, :body, :query]
+    PART_KEYS.each { |k| attr_accessor k }
+
+    defn(:initialize, Header, Body, Query) { |h, b, q| @header, @body, @query = h, b, q }
+    defn(:part, Symbol) { |p| send(p) }
+    defn(:parts) { PART_KEYS.inject({}) { |h, k| h.merge(k => send(k)) } }
+  end
+
   class RequestPartProcessing
     include Functional::PatternMatching
 
@@ -65,8 +75,7 @@ class Postbetween::PostbetweenHandler
     defn(:run) { run(@key, @part) }
 
     def into_outgoing(part, key, &block)
-      @handler.validate_request_part_and_key(part, key)
-      w = RequestPartWriter.new(@handler.outgoing_request_parts[part], key, self)
+      w = RequestPartWriter.new(part, key, self)
       if block_given?
         w.instance_eval(&block)
       end
@@ -77,20 +86,22 @@ class Postbetween::PostbetweenHandler
   class RequestPartWriter < RequestPartProcessing
     include Functional::PatternMatching
 
-    defn(:initialize, RequestPart, String, RequestPartReader) do |p, k, r|
+    defn(:initialize, Symbol, String, RequestPartReader) do |p, k, r|
       @part, @key, @reader = p, k, r
-    end
-    defn(:initialize, RequestPart, String, ::Postbetween::PostbetweenHandler) do |p, k, h|
+    end.when { |p, _, _| Request::PART_KEYS.include?(p) }
+    defn(:initialize, Symbol, String, ::Postbetween::PostbetweenHandler) do |p, k, h|
       @part, @key, @handler = p, k, h
-    end
+    end.when { |p, _, _| Request::PART_KEYS.include?(p) }
 
     defn(:value_or_default, _, _) { |v, _| v }
       .when { |v, _| array_or_hash(v) }
     defn(:value_or_default, _, _) { |v, k| k.kind_of?(Integer) ? [] : {} }
 
-    defn(:assign, _, _, RequestPartReader) { |v, k, r| v[k] = after.call(r.run) }
+    defn(:hacky_deep_dupe, _) { |v| Marshal.load(Marshal.dump(v)) }
+
+    defn(:assign, _, _, RequestPartReader) { |v, k, r| v[k] = after.call(hacky_deep_dupe(r.run)) }
       .when { |v, _, _| array_or_hash(v) }
-    defn(:assign, _, _, _, RequestPartReader) { |v, k, nk, r| v[k][nk] = after.call(r.run) }
+    defn(:assign, _, _, _, RequestPartReader) { |v, k, nk, r| v[k][nk] = after.call(hacky_deep_dupe(r.run)) }
       .when { |v, _, _, _| array_or_hash(v) }
 
     defn(:run, String, [], _, _, RequestPartReader) do |k, lv, lk, r|
@@ -111,7 +122,7 @@ class Postbetween::PostbetweenHandler
       nk = format(ks[0], p.contents)
       run(ks[1], ks[2..-1], p.contents, nk, r)
     end
-    defn(:run) { run(@key, @part, @reader)}
+    defn(:run, Request) { |r| run(@key, r.part(@part), @reader)}
 
     def from_incoming(part, key, &block)
       @handler.validate_request_part_and_key(part, key)
@@ -123,28 +134,32 @@ class Postbetween::PostbetweenHandler
     end
   end
 
-  attr_accessor :name, :incoming_request_parts, :outgoing_request_parts, :writers
+  attr_accessor :name, :incoming_request_parts, :outgoing_request, :writers
 
   defn(:initialize, String, Header, Body, Query) do |n, h, b, q|
     @name = n
     @incoming_request_parts = {header: h, body: b, query: q}
-    @outgoing_request_parts = {
-      header: Header.new({}),
-      body: Body.new({}),
-      query: Query.new({})
-    }
+    initialize_outgoing_request
     @writers = []
   end
   defn(:request_part_keys) { [:header, :body, :query] }
   defn(:validate_request_part_and_key, Symbol, String) do |s, k|
-    unless request_part_keys.include?(s)
+    unless Request::PART_KEYS.include?(s)
       raise ArgumentError, "Expected params [(:header, :body, :query), String]"
     end
   end
 
+  defn(:initialize_outgoing_request) do
+    @outgoing_request = Request.new(
+      Header.new({}),
+      Body.new({}),
+      Query.new({}))
+  end
+
   defn(:output) do
-    @writers.each { |w| w.run }
-    @outgoing_request_parts.map { |k, v| v.contents.to_s }
+    initialize_outgoing_request
+    @writers.each { |w| w.run(@outgoing_request) }
+    @outgoing_request.parts.map { |k, v| v.contents.to_s }
   end
 
   defn(:guard, Proc) { |p| @guard = p }
@@ -153,13 +168,13 @@ class Postbetween::PostbetweenHandler
     .when { |part, key| @incoming_request_parts[part] }
 
   defn(:set, Symbol, String, RequestPartReader) do |part, key, reader|
-    RequestPartWriter.new(@outgoing_request_parts[part], key, reader).run
-  end.when { |part, key, reader| @outgoing_request_parts[part] }
+    RequestPartWriter.new(@outgoing_request[part], key, reader).run
+  end.when { |part, key, reader| @outgoing_request[part] }
 
 
   def set_outgoing(part, key, &block)
     validate_request_part_and_key(part, key)
-    w = RequestPartWriter.new(@outgoing_request_parts[part], key, self)
+    w = RequestPartWriter.new(part, key, self)
     if block_given?
       w.instance_eval(&block)
     end
